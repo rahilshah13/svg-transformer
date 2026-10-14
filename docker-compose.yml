@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  edge-daemon:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM debian:bookworm-slim AS builder
+        RUN apt-get update && apt-get install -y openjdk-17-jdk curl bash
+        RUN ARCH=$$(dpkg --print-architecture) && \
+            if [ "$$ARCH" = "amd64" ]; then SCALA_ARCH="x86_64-pc-linux"; else SCALA_ARCH="aarch64-pc-linux"; fi && \
+            curl -sSL "https://github.com/VirtusLab/scala-cli/releases/latest/download/scala-cli-$${SCALA_ARCH}.gz" | gzip -d > /usr/local/bin/scala-cli && \
+            chmod +x /usr/local/bin/scala-cli
+        WORKDIR /build
+        COPY potraceDaemon.scala .
+        RUN scala-cli package potraceDaemon.scala --power --assembly -o potrace-daemon.jar
+
+        FROM debian:bookworm-slim
+        RUN apt-get update && apt-get install -y \
+            openjdk-17-jre-headless \
+            potrace \
+            python3 \
+            python3-pip \
+            bash \
+            && rm -rf /var/lib/apt/lists/*
+        WORKDIR /app
+        RUN pip install --no-cache-dir --break-system-packages jax jaxlib flax optax numpy fastapi uvicorn
+        COPY --from=builder /build/potrace-daemon.jar /app/potrace-daemon.jar
+        COPY transformerDaemon.py /app/transformerDaemon.py
+        RUN mkdir -p /app/watch /app/output /app/checkpoints
+        VOLUME ["/app/watch", "/app/output", "/app/checkpoints"]
+    image: scala-jax-daemon
+    container_name: edge-daemon
+    command: ["java", "-jar", "/app/potrace-daemon.jar", "/app/watch", "/app/output"]
+    volumes:
+      - ./watch:/app/watch
+      - ./output:/app/output
+    restart: unless-stopped
+
+  transformer-daemon:
+    image: scala-jax-daemon
+    container_name: transformer-daemon
+    command: ["python3", "-u", "/app/transformerDaemon.py", "--input_dir", "/app/output", "--checkpoint_dir", "/app/checkpoints"]
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./output:/app/output
+      - ./checkpoints:/app/checkpoints
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY index.html /app/index.html
+        EXPOSE 8000
+        CMD ["python3", "-m", "http.server", "8000"]
+    image: solidjs-frontend
+    container_name: frontend-ui
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

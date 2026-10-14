@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SVG Transformer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen flex flex-col justify-center items-center font-sans antialiased selection:bg-blue-500 selection:text-white">
+    <div id="app" class="w-full flex justify-center items-center"></div>
+
+    <script type="module">
+        import { createSignal, createEffect } from 'https://esm.sh/solid-js@1.8.22';
+        import { render } from 'https://esm.sh/solid-js@1.8.22/web';
+
+        function App() {
+            const [svgContent, setSvgContent] = createSignal('<div class="text-slate-400 text-base leading-relaxed">System ready. Click generate to trigger a forward pass and sample a vector graphic from the XLA graph.</div>');
+            const [loading, setLoading] = createSignal(false);
+            const [statusText, setStatusText] = createSignal('Idle');
+            const [modeText, setModeText] = createSignal('Standby');
+            const [svgSize, setSvgSize] = createSignal(0);
+
+            let boxRef, btnRef;
+
+            const generateSvg = async () => {
+                console.log("[UI] inferencing... ");
+                setLoading(true);
+                setStatusText('Sampling...');
+                setSvgSize(0);
+                setSvgContent('<div class="text-slate-400 text-base leading-relaxed">Executing compiled jax.lax.scan autoregressive generator...</div>');
+                
+                try {
+                    let res = await fetch('http://localhost:8001/generate');
+                    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                    
+                    const modeHeader = res.headers.get('X-Generator-Mode');
+                    if (modeHeader === 'random-noise') {
+                        setModeText('Random Noise (Fallback)');
+                    } else {
+                        setModeText('Trained Checkpoint');
+                    }
+
+                    let html = await res.text();
+                    const sizeBytes = new Blob([html]).size;
+                    setSvgSize(sizeBytes);
+                    console.log(`[UI] Received response. Size: ${sizeBytes} bytes.`);
+
+                    const trimmed = html.trim();
+                    if (!trimmed.startsWith('<svg') || !trimmed.endsWith('</svg>')) {
+                        setSvgContent(`
+                            <div class="flex flex-col gap-3 p-4 text-left w-full h-full overflow-y-auto font-mono text-xs bg-slate-950/80 rounded-xl border border-amber-500/30">
+                                <div class="text-amber-400 font-bold flex items-center gap-2">
+                                    <span>⚠️ Malformed/Gibberish SVG Output (${sizeBytes} bytes)</span>
+                                </div>
+                                <div class="text-slate-400 text-[11px] leading-relaxed">The model sampled text tokens instead of valid vector markup:</div>
+                                <pre class="text-slate-200 bg-slate-900 p-3 rounded border border-slate-800 whitespace-pre-wrap break-all">${html.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+                            </div>
+                        `);
+                        setStatusText('Invalid Markup');
+                    } else {
+                        setSvgContent(html);
+                        setStatusText('Rendered');
+                    }
+                } catch (err) {
+                    console.error("[UI] Inference pipeline fetch error:", err);
+                    setSvgContent('<div class="text-red-400 text-base leading-relaxed">Error generating SVG. Verify endpoint availability.</div>');
+                    setStatusText('Error');
+                    setModeText('Error');
+                }
+                setLoading(false);
+            };
+
+            createEffect(() => {
+                if (boxRef) boxRef.innerHTML = svgContent();
+            });
+
+            createEffect(() => {
+                if (btnRef) {
+                    btnRef.textContent = loading() ? 'Running Forward Pass...' : 'Generate SVG';
+                    btnRef.disabled = loading();
+                }
+            });
+
+            return (() => {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'flex flex-col items-center gap-6 w-full max-w-xl p-5 box-border';
+
+                const header = document.createElement('div');
+                header.className = 'text-center';
+                header.innerHTML = '<h1 class="text-2xl font-bold tracking-tight mb-2 text-slate-100">SVG Autoregressive Transformer</h1><p class="text-sm text-slate-400">JAX/Flax Causal Transformer Daemon & SolidJS Interface</p>';
+
+                boxRef = document.createElement('div');
+                boxRef.className = 'w-full h-[500px] bg-slate-900 p-6 rounded-2xl shadow-2xl flex justify-center items-center text-center border-2 border-dashed border-slate-800 box-border overflow-hidden relative';
+                boxRef.innerHTML = svgContent();
+
+                const badge = document.createElement('div');
+                badge.className = 'absolute top-4 right-4 bg-slate-950/85 border border-slate-800 px-3.5 py-2 rounded-full text-xs font-medium text-slate-300 backdrop-blur-md flex gap-2.5 items-center shadow-lg';
+                setInterval(() => { 
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full ${modeText().includes('Fallback') ? 'bg-amber-400' : 'bg-emerald-400'}"></span>Status: ${statusText()} | Mode: ${modeText()} | Size: ${svgSize()}B`; 
+                }, 100);
+                boxRef.appendChild(badge);
+
+                const controls = document.createElement('div');
+                controls.className = 'flex gap-3 w-full justify-center';
+
+                btnRef = document.createElement('button');
+                btnRef.className = 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-semibold px-7 py-3.5 rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 shadow-lg shadow-blue-500/20 disabled:shadow-none cursor-pointer';
+                btnRef.textContent = 'Generate SVG';
+                btnRef.onclick = generateSvg;
+
+                controls.appendChild(btnRef);
+                wrapper.appendChild(header);
+                wrapper.appendChild(boxRef);
+                wrapper.appendChild(controls);
+                return wrapper;
+            })();
+        }
+
+        render(() => App(), document.getElementById('app'));
+    </script>
+</body>
+</html>
