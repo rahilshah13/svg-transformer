@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SVG Transformer</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        /* Force child SVG elements to scale cleanly and fit inside container */
+        #svg-box svg {
+            width: 100%;
+            height: 100%;
+            max-width: 400px;
+            max-height: 400px;
+            object-fit: contain;
+            filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.15));
+        }
+    </style>
 </head>
 <body class="bg-slate-950 text-slate-100 h-screen flex flex-col justify-center items-center font-sans antialiased selection:bg-blue-500 selection:text-white">
     <div id="app" class="w-full flex justify-center items-center"></div>
@@ -14,7 +25,7 @@
         import { render } from 'https://esm.sh/solid-js@1.8.22/web';
 
         function App() {
-            const [svgContent, setSvgContent] = createSignal('<div class="text-slate-400 text-base leading-relaxed">System ready. Click generate to trigger a forward pass and sample a vector graphic from the XLA graph.</div>');
+            const [svgContent, setSvgContent] = createSignal('<div class="text-slate-400 text-base leading-relaxed select-none">System ready. Click generate to trigger a forward pass and sample a vector graphic from the XLA graph.</div>');
             const [loading, setLoading] = createSignal(false);
             const [statusText, setStatusText] = createSignal('Idle');
             const [modeText, setModeText] = createSignal('Standby');
@@ -27,15 +38,17 @@
                 setLoading(true);
                 setStatusText('Sampling...');
                 setSvgSize(0);
-                setSvgContent('<div class="text-slate-400 text-base leading-relaxed">Executing compiled jax.lax.scan autoregressive generator...</div>');
+                setSvgContent('<div class="text-slate-400 text-base leading-relaxed select-none">Executing vector diffusion reverse denoising graph...</div>');
                 
                 try {
-                    let res = await fetch('http://localhost:8001/generate');
+                    let res = await fetch('http://127.0.0.1:8001/generate');
                     if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                     
                     const modeHeader = res.headers.get('X-Generator-Mode');
                     if (modeHeader === 'random-noise') {
                         setModeText('Random Noise (Fallback)');
+                    } else if (modeHeader === 'diffusion-blended') {
+                        setModeText('Diffusion Blended');
                     } else {
                         setModeText('Trained Checkpoint');
                     }
@@ -46,13 +59,16 @@
                     console.log(`[UI] Received response. Size: ${sizeBytes} bytes.`);
 
                     const trimmed = html.trim();
-                    if (!trimmed.startsWith('<svg') || !trimmed.endsWith('</svg>')) {
+                    const hasOpeningSvg = /<svg[\s>]/i.test(trimmed);
+                    const hasClosingSvg = /<\/svg\s*>/i.test(trimmed);
+
+                    if (!hasOpeningSvg || !hasClosingSvg) {
                         setSvgContent(`
-                            <div class="flex flex-col gap-3 p-4 text-left w-full h-full overflow-y-auto font-mono text-xs bg-slate-950/80 rounded-xl border border-amber-500/30">
+                            <div class="flex flex-col gap-3 p-4 text-left w-full h-full overflow-y-auto font-mono text-xs bg-slate-950/90 rounded-xl border border-amber-500/30 backdrop-blur-sm">
                                 <div class="text-amber-400 font-bold flex items-center gap-2">
-                                    <span>⚠️ Malformed/Gibberish SVG Output (${sizeBytes} bytes)</span>
+                                    <span>⚠️ Malformed Output (${sizeBytes} bytes)</span>
                                 </div>
-                                <div class="text-slate-400 text-[11px] leading-relaxed">The model sampled text tokens instead of valid vector markup:</div>
+                                <div class="text-slate-400 text-[11px] leading-relaxed">The model returned non-vector content instead of valid SVG markup:</div>
                                 <pre class="text-slate-200 bg-slate-900 p-3 rounded border border-slate-800 whitespace-pre-wrap break-all">${html.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
                             </div>
                         `);
@@ -63,7 +79,7 @@
                     }
                 } catch (err) {
                     console.error("[UI] Inference pipeline fetch error:", err);
-                    setSvgContent('<div class="text-red-400 text-base leading-relaxed">Error generating SVG. Verify endpoint availability.</div>');
+                    setSvgContent('<div class="text-red-400 text-base leading-relaxed select-none">Error generating SVG. Verify endpoint availability on port 8001.</div>');
                     setStatusText('Error');
                     setModeText('Error');
                 }
@@ -76,7 +92,7 @@
 
             createEffect(() => {
                 if (btnRef) {
-                    btnRef.textContent = loading() ? 'Running Forward Pass...' : 'Generate SVG';
+                    btnRef.textContent = loading() ? 'Running Reverse Denoising...' : 'Generate SVG';
                     btnRef.disabled = loading();
                 }
             });
@@ -87,14 +103,16 @@
 
                 const header = document.createElement('div');
                 header.className = 'text-center';
-                header.innerHTML = '<h1 class="text-2xl font-bold tracking-tight mb-2 text-slate-100">SVG Autoregressive Transformer</h1><p class="text-sm text-slate-400">JAX/Flax Causal Transformer Daemon & SolidJS Interface</p>';
+                header.innerHTML = '<h1 class="text-2xl font-bold tracking-tight mb-2 text-slate-100">SVG Diffusion Transformer</h1><p class="text-sm text-slate-400">JAX/Flax Vector Diffusion Daemon & SolidJS Interface</p>';
 
                 boxRef = document.createElement('div');
-                boxRef.className = 'w-full h-[500px] bg-slate-900 p-6 rounded-2xl shadow-2xl flex justify-center items-center text-center border-2 border-dashed border-slate-800 box-border overflow-hidden relative';
+                boxRef.id = 'svg-box';
+                // Patterned grid background with transparency contrast for small shapes
+                boxRef.className = 'w-full h-[500px] bg-slate-950 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px] p-6 rounded-2xl shadow-2xl flex justify-center items-center text-center border-2 border-dashed border-slate-800 box-border overflow-hidden relative';
                 boxRef.innerHTML = svgContent();
 
                 const badge = document.createElement('div');
-                badge.className = 'absolute top-4 right-4 bg-slate-950/85 border border-slate-800 px-3.5 py-2 rounded-full text-xs font-medium text-slate-300 backdrop-blur-md flex gap-2.5 items-center shadow-lg';
+                badge.className = 'absolute top-4 right-4 bg-slate-900/90 border border-slate-800 px-3.5 py-2 rounded-full text-xs font-medium text-slate-300 backdrop-blur-md flex gap-2.5 items-center shadow-lg pointer-events-none select-none';
                 setInterval(() => { 
                     badge.innerHTML = `<span class="w-2 h-2 rounded-full ${modeText().includes('Fallback') ? 'bg-amber-400' : 'bg-emerald-400'}"></span>Status: ${statusText()} | Mode: ${modeText()} | Size: ${svgSize()}B`; 
                 }, 100);
