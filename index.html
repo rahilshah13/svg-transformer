@@ -3,11 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SVG Transformer</title>
+    <title>SVG Inter-Item Flow Diffusion & NTK Telemetry</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <style>
-        /* Force child SVG elements to scale cleanly and fit inside container */
-        #svg-box svg {
+        #svg-box svg, #active-svg-container svg {
             width: 100%;
             height: 100%;
             max-width: 400px;
@@ -15,61 +14,148 @@
             object-fit: contain;
             filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
         }
+
+        /* -----------------------------------------------------------------
+         * Flicker-Free Attribute Tooltips (Driven by CSS ::after / ::before)
+         * ----------------------------------------------------------------- */
+        [data-tooltip] {
+            position: relative;
+            cursor: help;
+        }
+
+        [data-tooltip]::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 125%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 180px;
+            padding: 6px 8px;
+            background-color: #0f172a;
+            color: #94a3b8;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            font-size: 10px;
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            font-weight: 400;
+            line-height: 1.3;
+            text-align: center;
+            white-space: normal;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+            
+            /* Hidden by default */
+            visibility: hidden;
+            opacity: 0;
+            transition: opacity 0.15s ease-in-out, visibility 0.15s ease-in-out;
+            
+            /* Absolutely prevent mouse interaction with the tooltip bubble */
+            pointer-events: none !important;
+            z-index: 100;
+        }
+
+        [data-tooltip]::before {
+            content: '';
+            position: absolute;
+            bottom: 105%;
+            left: 50%;
+            transform: translateX(-50%);
+            border-width: 5px;
+            border-style: solid;
+            border-color: #334155 transparent transparent transparent;
+            
+            visibility: hidden;
+            opacity: 0;
+            transition: opacity 0.15s ease-in-out, visibility 0.15s ease-in-out;
+            pointer-events: none !important;
+            z-index: 100;
+        }
+
+        /* Reveal tooltip on hover without altering DOM or firing events */
+        [data-tooltip]:hover::after,
+        [data-tooltip]:hover::before {
+            visibility: visible;
+            opacity: 1;
+        }
     </style>
 </head>
-<body class="bg-slate-950 text-slate-100 h-screen flex flex-col justify-center items-center font-sans antialiased selection:bg-blue-500 selection:text-white">
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-center items-center font-sans antialiased selection:bg-blue-500 selection:text-white py-10">
     <div id="app" class="w-full flex justify-center items-center"></div>
 
     <script type="module">
-        import { createSignal, createEffect } from 'https://esm.sh/solid-js@1.8.22';
+        import { createSignal, createEffect, onMount } from 'https://esm.sh/solid-js@1.8.22';
         import { render } from 'https://esm.sh/solid-js@1.8.22/web';
 
         function App() {
-            const [svgContent, setSvgContent] = createSignal('<div class="text-slate-500 text-base leading-relaxed select-none">System ready. Click generate to trigger a forward pass and sample a vector graphic from the XLA graph.</div>');
+            const [svgContent, setSvgContent] = createSignal('<div class="text-slate-500 text-base leading-relaxed select-none">System ready. Click generate to sample a vector graphic trajectory.</div>');
             const [loading, setLoading] = createSignal(false);
             const [statusText, setStatusText] = createSignal('Idle');
             const [modeText, setModeText] = createSignal('Standby');
             const [svgSize, setSvgSize] = createSignal(0);
 
-            let boxRef, btnRef;
+            const [metrics, setMetrics] = createSignal({
+                status: 'Connecting...',
+                current_file: 'None',
+                epoch: 0,
+                max_epochs: 1000,
+                mse_loss: 0.0,
+                ssim_loss: 0.0,
+                combined_loss: 0.0,
+                high_t_mse: 0.0,
+                low_t_mse: 0.0,
+                velocity_cosine_sim: 0.0,
+                spatial_coord_var: 0.0,
+                effective_rank: 0.0,
+                kernel_alignment: 0.0,
+                attention_entropy: 0.0,
+                dataset_count: 0,
+                buffer_size: 0,
+                sequence_length: 0,
+                mode: 'Standby',
+                active_svg: ''
+            });
+
+            let boxRef, btnRef, activeSvgRef;
+
+            const fetchMetrics = async () => {
+                try {
+                    const res = await fetch('http://127.0.0.1:8001/metrics');
+                    if (res.ok) {
+                        const data = await res.json();
+                        setMetrics(data);
+                    }
+                } catch (e) {
+                    setMetrics(prev => ({ ...prev, status: 'Offline' }));
+                }
+            };
+
+            onMount(() => {
+                fetchMetrics();
+                const interval = setInterval(fetchMetrics, 1000);
+                return () => clearInterval(interval);
+            });
 
             const generateSvg = async () => {
-                console.log("[UI] inferencing... ");
                 setLoading(true);
                 setStatusText('Sampling...');
                 setSvgSize(0);
-                setSvgContent('<div class="text-slate-500 text-base leading-relaxed select-none">Executing vector diffusion reverse denoising graph...</div>');
+                setSvgContent('<div class="text-slate-500 text-base leading-relaxed select-none">Integrating velocity field across learned vector manifold...</div>');
                 
                 try {
                     let res = await fetch('http://127.0.0.1:8001/generate');
                     if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                     
                     const modeHeader = res.headers.get('X-Generator-Mode');
-                    if (modeHeader === 'random-noise') {
-                        setModeText('Random Noise (Fallback)');
-                    } else if (modeHeader === 'diffusion-blended') {
-                        setModeText('Diffusion Blended');
-                    } else {
-                        setModeText('Trained Checkpoint');
-                    }
+                    setModeText(modeHeader || 'Trained Checkpoint');
 
                     let html = await res.text();
                     const sizeBytes = new Blob([html]).size;
                     setSvgSize(sizeBytes);
-                    console.log(`[UI] Received response. Size: ${sizeBytes} bytes.`);
 
                     const trimmed = html.trim();
-                    const hasOpeningSvg = /<svg[\s>]/i.test(trimmed);
-                    const hasClosingSvg = /<\/svg\s*>/i.test(trimmed);
-
-                    if (!hasOpeningSvg || !hasClosingSvg) {
+                    if (!/<svg[\s>]/i.test(trimmed) || !/<\/svg\s*>/i.test(trimmed)) {
                         setSvgContent(`
-                            <div class="flex flex-col gap-3 p-4 text-left w-full h-full overflow-y-auto font-mono text-xs bg-slate-950/90 rounded-xl border border-amber-500/30 backdrop-blur-sm">
-                                <div class="text-amber-400 font-bold flex items-center gap-2">
-                                    <span>⚠️ Malformed Output (${sizeBytes} bytes)</span>
-                                </div>
-                                <div class="text-slate-400 text-[11px] leading-relaxed">The model returned non-vector content instead of valid SVG markup:</div>
-                                <pre class="text-slate-200 bg-slate-900 p-3 rounded border border-slate-800 whitespace-pre-wrap break-all">${html.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+                            <div class="p-4 text-left font-mono text-xs text-amber-400 bg-slate-950 rounded-xl border border-amber-500/30">
+                                ⚠️ Non-SVG Content Returned (${sizeBytes} bytes)
                             </div>
                         `);
                         setStatusText('Invalid Markup');
@@ -78,42 +164,186 @@
                         setStatusText('Rendered');
                     }
                 } catch (err) {
-                    console.error("[UI] Inference pipeline fetch error:", err);
-                    setSvgContent('<div class="text-red-500 text-base leading-relaxed select-none">Error generating SVG. Verify endpoint availability on port 8001.</div>');
+                    setSvgContent('<div class="text-red-500 text-base select-none">Error generating SVG. Verify daemon availability on port 8001.</div>');
                     setStatusText('Error');
                     setModeText('Error');
                 }
                 setLoading(false);
             };
 
+            createEffect(() => { if (boxRef) boxRef.innerHTML = svgContent(); });
+            
             createEffect(() => {
-                if (boxRef) boxRef.innerHTML = svgContent();
+                if (activeSvgRef) {
+                    const activeSvg = metrics().active_svg;
+                    if (activeSvg) {
+                        activeSvgRef.innerHTML = activeSvg;
+                    } else {
+                        activeSvgRef.innerHTML = '<div class="text-slate-600 text-xs select-none">Awaiting intermediate trajectory pass...</div>';
+                    }
+                }
             });
 
             createEffect(() => {
                 if (btnRef) {
-                    btnRef.textContent = loading() ? 'Running Reverse Denoising...' : 'Generate SVG';
+                    btnRef.textContent = loading() ? 'Integrating Trajectory Field...' : 'Generate SVG';
                     btnRef.disabled = loading();
                 }
             });
 
             return (() => {
                 const wrapper = document.createElement('div');
-                wrapper.className = 'flex flex-col items-center gap-6 w-full max-w-xl p-5 box-border';
+                wrapper.className = 'flex flex-col items-center gap-5 w-full max-w-3xl p-5 box-border';
 
                 const header = document.createElement('div');
                 header.className = 'text-center';
-                header.innerHTML = '<h1 class="text-2xl font-bold tracking-tight mb-2 text-slate-100">SVG Diffusion Transformer</h1><p class="text-sm text-slate-400">JAX/Flax Vector Diffusion Daemon & SolidJS Interface</p>';
+                header.innerHTML = '<h1 class="text-2xl font-bold tracking-tight mb-1 text-slate-100">SVG Inter-Item Flow Diffusion</h1><p class="text-xs text-slate-400">NTK Infinite-Width Vector Dynamics & Attention Telemetry</p>';
+
+                // 1. Core Telemetry Summary Panel (Static Skeleton, Targeted Value Updates)
+                const mainTelemetryPanel = document.createElement('div');
+                mainTelemetryPanel.className = 'w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs grid grid-cols-5 gap-2 text-center backdrop-blur-md shadow-lg';
+                mainTelemetryPanel.innerHTML = `
+                    <div class="flex flex-col items-center">
+                        <span data-tooltip="Current execution state of the continuous fine-tuning loop." class="text-slate-500 uppercase font-semibold text-[9px] border-b border-dotted border-slate-700">Status</span>
+                        <span id="m-status" class="font-mono text-slate-200 mt-1">--</span>
+                    </div>
+                    <div class="flex flex-col items-center">
+                        <span data-tooltip="Total processed SVGs vs. active samples held in the rolling Optax replay buffer." class="text-slate-500 uppercase font-semibold text-[9px] border-b border-dotted border-slate-700">Dataset / Buffer</span>
+                        <span id="m-dataset" class="font-mono text-blue-400 mt-1">--</span>
+                    </div>
+                    <div class="flex flex-col items-center">
+                        <span data-tooltip="Current optimization step count for the active training target." class="text-slate-500 uppercase font-semibold text-[9px] border-b border-dotted border-slate-700">Epoch</span>
+                        <span id="m-epoch" class="font-mono text-slate-200 mt-1">--</span>
+                    </div>
+                    <div class="flex flex-col items-center">
+                        <span data-tooltip="Mean Squared Error between predicted and ground-truth velocity fields." class="text-slate-500 uppercase font-semibold text-[9px] border-b border-dotted border-slate-700">MSE Loss</span>
+                        <span id="m-mse" class="font-mono text-amber-400 mt-1">--</span>
+                    </div>
+                    <div class="flex flex-col items-center">
+                        <span data-tooltip="Structural Similarity Index Loss [0, 1]. Measures geometric topological alignment." class="text-slate-500 uppercase font-semibold text-[9px] border-b border-dotted border-slate-700">SSIM Loss</span>
+                        <span id="m-ssim" class="font-mono text-emerald-400 mt-1">--</span>
+                    </div>
+                `;
+
+                // 2. Advanced Metrics Panel (Static Skeleton, Targeted Value Updates)
+                const advancedMetricsPanel = document.createElement('div');
+                advancedMetricsPanel.className = 'w-full grid grid-cols-2 gap-3 text-xs';
+
+                const diffusionMetricsCard = document.createElement('div');
+                diffusionMetricsCard.className = 'bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-col gap-2 shadow-md backdrop-blur-md';
+                diffusionMetricsCard.innerHTML = `
+                    <div class="text-[10px] text-blue-400 uppercase font-bold tracking-wider border-b border-slate-800 pb-1 flex justify-between">
+                        <span>Diffusion Denoising Metrics</span>
+                        <span class="font-mono text-slate-400">t ∈ [0, 1]</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 font-mono text-[11px] mt-1">
+                        <div>
+                            <span data-tooltip="Loss near macro interpolation origin (t=1). Tracks coarse shape alignment." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">High-t MSE (t ≥ 0.5)</span>
+                            <span id="m-hight" class="text-slate-200 font-semibold">--</span>
+                        </div>
+                        <div>
+                            <span data-tooltip="Loss near fine target convergence (t=0). Tracks curve/coordinate precision." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Low-t MSE (t < 0.5)</span>
+                            <span id="m-lowt" class="text-slate-200 font-semibold">--</span>
+                        </div>
+                        <div>
+                            <span data-tooltip="Directional agreement between predicted and target velocity vectors. Approaches 1.0." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Velocity Cosine Sim</span>
+                            <span id="m-cossim" class="text-emerald-400 font-semibold">--</span>
+                        </div>
+                        <div>
+                            <span data-tooltip="Spatial coordinate variance. Drops toward 0 signal mode collapse." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Coord Var (Var(x,y))</span>
+                            <span id="m-coordvar" class="text-purple-400 font-semibold">--</span>
+                        </div>
+                    </div>
+                `;
+
+                const ntkMetricsCard = document.createElement('div');
+                ntkMetricsCard.className = 'bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-col gap-2 shadow-md backdrop-blur-md';
+                ntkMetricsCard.innerHTML = `
+                    <div class="text-[10px] text-emerald-400 uppercase font-bold tracking-wider border-b border-slate-800 pb-1 flex justify-between">
+                        <span>Attention & NTK Dynamics</span>
+                        <span class="font-mono text-slate-400">d_model=2048</span>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 font-mono text-[11px] mt-1">
+                        <div>
+                            <span data-tooltip="Dimensional capacity of representation space. High rank indicates feature diversity." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Effective Rank</span>
+                            <span id="m-rank" class="text-amber-400 font-semibold">--</span>
+                        </div>
+                        <div>
+                            <span data-tooltip="Target-Kernel Alignment (TKA). Measures how NTK features restructure to fit dataset geometry." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Target Alignment</span>
+                            <span id="m-tka" class="text-blue-400 font-semibold">--</span>
+                        </div>
+                        <div>
+                            <span data-tooltip="Attention distribution entropy. Decreasing entropy signals specialized head focus." class="text-slate-500 text-[9px] block uppercase border-b border-dotted border-slate-800 w-max">Head Entropy</span>
+                            <span id="m-entropy" class="text-slate-200 font-semibold">--</span>
+                        </div>
+                    </div>
+                `;
+
+                advancedMetricsPanel.appendChild(diffusionMetricsCard);
+                advancedMetricsPanel.appendChild(ntkMetricsCard);
+
+                // Polling Loop: Direct Text Node Updates (Prevents DOM Reconstruction)
+                setInterval(() => {
+                    const m = metrics();
+                    const el = (id) => document.getElementById(id);
+
+                    if (el('m-status')) el('m-status').textContent = m.status;
+                    if (el('m-dataset')) el('m-dataset').textContent = `${m.dataset_count} / B=${m.buffer_size}`;
+                    if (el('m-epoch')) el('m-epoch').textContent = `${m.epoch}/${m.max_epochs}`;
+                    if (el('m-mse')) el('m-mse').textContent = m.mse_loss;
+                    if (el('m-ssim')) el('m-ssim').textContent = m.ssim_loss;
+
+                    if (el('m-hight')) el('m-hight').textContent = m.high_t_mse;
+                    if (el('m-lowt')) el('m-lowt').textContent = m.low_t_mse;
+                    if (el('m-cossim')) el('m-cossim').textContent = m.velocity_cosine_sim;
+                    if (el('m-coordvar')) el('m-coordvar').textContent = m.spatial_coord_var;
+
+                    if (el('m-rank')) el('m-rank').textContent = m.effective_rank;
+                    if (el('m-tka')) el('m-tka').textContent = m.kernel_alignment;
+                    if (el('m-entropy')) el('m-entropy').textContent = m.attention_entropy;
+                }, 200);
+
+                // 3. Active Forward Pass Trajectory Container
+                const activeBatchCard = document.createElement('div');
+                activeBatchCard.className = 'w-full bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 shadow-xl backdrop-blur-md';
+
+                const cardHeader = document.createElement('div');
+                cardHeader.className = 'flex justify-between items-center border-b border-slate-800/80 pb-2.5';
+
+                setInterval(() => {
+                    const m = metrics();
+                    const isTraining = m.status === 'Training';
+
+                    cardHeader.innerHTML = `
+                        <div class="flex items-center gap-2">
+                            <span class="relative flex h-2.5 w-2.5">
+                                <span class="${isTraining ? 'animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75' : ''}"></span>
+                                <span class="relative inline-flex rounded-full h-2.5 w-2.5 ${isTraining ? 'bg-blue-500' : 'bg-slate-600'}"></span>
+                            </span>
+                            <span class="text-xs font-semibold text-slate-200 uppercase tracking-wider">Active Forward Pass Trajectory</span>
+                        </div>
+                        <span class="text-[11px] font-mono px-2 py-0.5 rounded ${isTraining ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-slate-800 text-slate-400'}">
+                            ${m.current_file !== 'None' ? m.current_file : 'Standby'}
+                        </span>
+                    `;
+                }, 200);
+
+                activeSvgRef = document.createElement('div');
+                activeSvgRef.id = 'active-svg-container';
+                activeSvgRef.className = 'bg-white p-3 rounded-xl border border-slate-800/60 flex justify-center items-center h-48 overflow-hidden relative shadow-inner';
+
+                activeBatchCard.appendChild(cardHeader);
+                activeBatchCard.appendChild(activeSvgRef);
 
                 boxRef = document.createElement('div');
                 boxRef.id = 'svg-box';
-                boxRef.className = 'w-full h-[500px] bg-white p-6 rounded-2xl shadow-2xl flex justify-center items-center text-center border-2 border-slate-200 box-border overflow-hidden relative';
+                boxRef.className = 'w-full h-[360px] bg-white p-6 rounded-2xl shadow-2xl flex justify-center items-center text-center border-2 border-slate-200 box-border overflow-hidden relative';
                 boxRef.innerHTML = svgContent();
 
                 const badge = document.createElement('div');
-                badge.className = 'absolute top-4 right-4 bg-slate-900/90 border border-slate-800 px-3.5 py-2 rounded-full text-xs font-medium text-slate-300 backdrop-blur-md flex gap-2.5 items-center shadow-lg pointer-events-none select-none';
+                badge.className = 'absolute top-4 right-4 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-full text-xs font-medium text-slate-300 backdrop-blur-md flex gap-2 items-center shadow-lg pointer-events-none select-none';
                 setInterval(() => { 
-                    badge.innerHTML = `<span class="w-2 h-2 rounded-full ${modeText().includes('Fallback') ? 'bg-amber-400' : 'bg-emerald-400'}"></span>Status: ${statusText()} | Mode: ${modeText()} | Size: ${svgSize()}B`; 
+                    badge.innerHTML = `<span class="w-2 h-2 rounded-full ${modeText().includes('Fallback') ? 'bg-amber-400' : 'bg-emerald-400'}"></span>Status: ${statusText()} | Mode: ${modeText()}`; 
                 }, 100);
                 boxRef.appendChild(badge);
 
@@ -121,12 +351,15 @@
                 controls.className = 'flex gap-3 w-full justify-center';
 
                 btnRef = document.createElement('button');
-                btnRef.className = 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-semibold px-7 py-3.5 rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 shadow-lg shadow-blue-500/20 disabled:shadow-none cursor-pointer';
+                btnRef.className = 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-semibold px-7 py-3 rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 shadow-lg shadow-blue-500/20 cursor-pointer';
                 btnRef.textContent = 'Generate SVG';
                 btnRef.onclick = generateSvg;
 
                 controls.appendChild(btnRef);
                 wrapper.appendChild(header);
+                wrapper.appendChild(mainTelemetryPanel);
+                wrapper.appendChild(advancedMetricsPanel);
+                wrapper.appendChild(activeBatchCard);
                 wrapper.appendChild(boxRef);
                 wrapper.appendChild(controls);
                 return wrapper;
