@@ -28,16 +28,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_PATHS = 16       # Fixed maximum number of SVG path primitives per file
-ATTR_DIM = 8         # Features: [is_circle, x, y, r, stroke_width, red, green, blue]
+CMD_DIM = 10  # Features: [cmd_type, x, y, cx1, cy1, cx2, cy2, stroke_width, red, green]
+
+# Command Types
+CMD_PAD = 0.0
+CMD_MOVE = 1.0   # M x y
+CMD_LINE = 2.0   # L x y
+CMD_CUBIC = 3.0  # C cx1 cy1 cx2 cy2 x y
 
 
 # -----------------------------------------------------------------------------
-# 1. SVG Parsing & Vector Serialization
+# 1. Fully Dynamic SVG Path Parsing & Serialization
 # -----------------------------------------------------------------------------
 
 def parse_color(color_str):
-    """Converts hex or basic string color into normalized [R, G, B] floats (0-1)."""
+    """Parses color strings or defaults to black [0, 0, 0]."""
     if not color_str or color_str == "none":
         return [0.0, 0.0, 0.0]
     color_str = color_str.strip().lower()
@@ -47,11 +52,61 @@ def parse_color(color_str):
             hex_str = "".join([c * 2 for c in hex_str])
         if len(hex_str) == 6:
             return [int(hex_str[i:i+2], 16) / 255.0 for i in (0, 2, 4)]
-    return [0.2, 0.5, 0.8]  # Fallback default tint
+    return [0.0, 0.0, 0.0]
 
 
-def svg_to_vector(svg_text, max_paths=MAX_PATHS):
-    """Parses SVG XML tags into a normalized numpy array of continuous vector features."""
+def parse_svg_path_d(d_str, stroke_w=2.0, color=(0.0, 0.0, 0.0)):
+    """Parses arbitrary SVG path string 'd' attribute into continuous command vectors."""
+    commands = []
+    tokens = re.findall(r'([A-Za-z])|(-?\d*\.?\d+(?:e[-+]?\d+)?)', d_str)
+    
+    current_cmd = None
+    args = []
+    
+    def process_command(cmd, coords):
+        c_type = CMD_PAD
+        x = y = cx1 = cy1 = cx2 = cy2 = 0.5
+        
+        if cmd in ('M', 'm'):
+            c_type = CMD_MOVE
+            if len(coords) >= 2:
+                x, y = coords[0] / 100.0, coords[1] / 100.0
+        elif cmd in ('L', 'l'):
+            c_type = CMD_LINE
+            if len(coords) >= 2:
+                x, y = coords[0] / 100.0, coords[1] / 100.0
+        elif cmd in ('C', 'c'):
+            c_type = CMD_CUBIC
+            if len(coords) >= 6:
+                cx1, cy1 = coords[0] / 100.0, coords[1] / 100.0
+                cx2, cy2 = coords[2] / 100.0, coords[3] / 100.0
+                x, y = coords[4] / 100.0, coords[5] / 100.0
+        else:
+            return None
+            
+        r, g = color[0], color[1]
+        sw = stroke_w / 10.0
+        return [c_type, x, y, cx1, cy1, cx2, cy2, sw, r, g]
+
+    for t_cmd, t_num in tokens:
+        if t_cmd:
+            if current_cmd and args:
+                res = process_command(current_cmd, args)
+                if res: commands.append(res)
+                args = []
+            current_cmd = t_cmd
+        elif t_num:
+            args.append(float(t_num))
+
+    if current_cmd and args:
+        res = process_command(current_cmd, args)
+        if res: commands.append(res)
+
+    return commands
+
+
+def svg_to_vector_sequence(svg_text):
+    """Encodes arbitrary SVG XML into an un-truncated dynamic length sequence of path commands."""
     vectors = []
     try:
         clean_text = re.sub(r'xmlns="[^"]+"', '', svg_text)
@@ -59,69 +114,69 @@ def svg_to_vector(svg_text, max_paths=MAX_PATHS):
         
         for elem in root.iter():
             tag = elem.tag.split('}')[-1]
-            if tag == 'circle':
-                cx = float(elem.get('cx', 50)) / 100.0
-                cy = float(elem.get('cy', 50)) / 100.0
-                r = float(elem.get('r', 10)) / 100.0
-                sw = float(elem.get('stroke-width', 2)) / 10.0
-                rgb = parse_color(elem.get('stroke', elem.get('fill', '#000000')))
-                vectors.append([1.0, cx, cy, r, sw, rgb[0], rgb[1], rgb[2]])
+            stroke_w = float(elem.get('stroke-width', 2.0))
+            rgb = parse_color(elem.get('stroke', elem.get('fill', '#000000')))
+            
+            if tag == 'path':
+                d = elem.get('d', '')
+                parsed = parse_svg_path_d(d, stroke_w=stroke_w, color=rgb)
+                vectors.extend(parsed)
+            elif tag == 'circle':
+                cx, cy = float(elem.get('cx', 50)), float(elem.get('cy', 50))
+                r = float(elem.get('r', 10))
+                vectors.append([CMD_MOVE, (cx + r)/100.0, cy/100.0, 0.5, 0.5, 0.5, 0.5, stroke_w/10.0, rgb[0], rgb[1]])
+                vectors.append([CMD_CUBIC, (cx - r)/100.0, cy/100.0, (cx + r)/100.0, (cy + r)/100.0, (cx - r)/100.0, (cy + r)/100.0, stroke_w/10.0, rgb[0], rgb[1]])
             elif tag == 'rect':
-                x = (float(elem.get('x', 0)) + float(elem.get('width', 20)) / 2) / 100.0
-                y = (float(elem.get('y', 0)) + float(elem.get('height', 20)) / 2) / 100.0
-                r = float(elem.get('width', 20)) / 200.0
-                sw = float(elem.get('stroke-width', 2)) / 10.0
-                rgb = parse_color(elem.get('stroke', elem.get('fill', '#000000')))
-                vectors.append([0.0, x, y, r, sw, rgb[0], rgb[1], rgb[2]])
+                x, y = float(elem.get('x', 10)), float(elem.get('y', 10))
+                w, h = float(elem.get('width', 20)), float(elem.get('height', 20))
+                vectors.append([CMD_MOVE, x/100.0, y/100.0, 0.5, 0.5, 0.5, 0.5, stroke_w/10.0, rgb[0], rgb[1]])
+                vectors.append([CMD_LINE, (x+w)/100.0, y/100.0, 0.5, 0.5, 0.5, 0.5, stroke_w/10.0, rgb[0], rgb[1]])
+                vectors.append([CMD_LINE, (x+w)/100.0, (y+h)/100.0, 0.5, 0.5, 0.5, 0.5, stroke_w/10.0, rgb[0], rgb[1]])
+                vectors.append([CMD_LINE, x/100.0, (y+h)/100.0, 0.5, 0.5, 0.5, 0.5, stroke_w/10.0, rgb[0], rgb[1]])
     except Exception as e:
-        print(f"[!] XML Parsing error: {e}")
+        print(f"[!] XML Path Parsing error: {e}")
 
     if not vectors:
-        vectors = [[1.0, 0.5, 0.5, 0.2, 0.2, 0.1, 0.5, 0.9]]
+        vectors = [[CMD_MOVE, 0.1, 0.1, 0.5, 0.5, 0.5, 0.5, 0.2, 0.0, 0.0],
+                   [CMD_LINE, 0.9, 0.9, 0.5, 0.5, 0.5, 0.5, 0.2, 0.0, 0.0]]
 
-    vec_arr = np.array(vectors, dtype=np.float32)
-    if len(vec_arr) < max_paths:
-        pad_len = max_paths - len(vec_arr)
-        padding = np.zeros((pad_len, ATTR_DIM), dtype=np.float32)
-        vec_arr = np.vstack([vec_arr, padding])
-    else:
-        vec_arr = vec_arr[:max_paths]
-
-    return vec_arr
+    return np.array(vectors, dtype=np.float32)
 
 
-def vector_to_svg(vector_arr):
-    """Reconstructs valid SVG XML string from continuous vector array predictions."""
-    svg_elements = ['<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">']
+def vector_sequence_to_svg(cmd_matrix):
+    """Reconstructs scalable SVG markup using dynamically predicted attributes."""
+    path_d_list = []
     
-    for vec in vector_arr:
-        is_circle, x, y, r, sw, red, green, blue = vec
+    avg_sw = np.mean(cmd_matrix[:, 7]) * 10.0 if len(cmd_matrix) > 0 else 2.0
+    stroke_width = np.clip(avg_sw, 0.5, 8.0)
+    
+    avg_r = int(np.clip(np.mean(cmd_matrix[:, 8]) * 255, 0, 255)) if len(cmd_matrix) > 0 else 0
+    avg_g = int(np.clip(np.mean(cmd_matrix[:, 9]) * 255, 0, 255)) if len(cmd_matrix) > 0 else 0
+    color_hex = f"#{avg_r:02x}{avg_g:02x}00" if (avg_r > 10 or avg_g > 10) else "#000000"
+
+    for vec in cmd_matrix:
+        c_type, x, y, cx1, cy1, cx2, cy2, sw, r, g = vec
         
-        if r < 0.01:
-            continue
-            
-        cx, cy = np.clip(x * 100.0, 0, 100), np.clip(y * 100.0, 0, 100)
-        radius = np.clip(r * 100.0, 1, 50)
-        stroke_w = np.clip(sw * 10.0, 0.5, 10)
+        px, py = np.clip(x * 100.0, 0, 100), np.clip(y * 100.0, 0, 100)
+        pcx1, pcy1 = np.clip(cx1 * 100.0, 0, 100), np.clip(cy1 * 100.0, 0, 100)
+        pcx2, pcy2 = np.clip(cx2 * 100.0, 0, 100), np.clip(cy2 * 100.0, 0, 100)
         
-        r_byte = int(np.clip(red * 255, 0, 255))
-        g_byte = int(np.clip(green * 255, 0, 255))
-        b_byte = int(np.clip(blue * 255, 0, 255))
-        color_hex = f"#{r_byte:02x}{g_byte:02x}{b_byte:02x}"
-        
-        if is_circle > 0.5:
-            elem = f'  <circle cx="{cx:.1f}" cy="{cy:.1f}" r="{radius:.1f}" fill="none" stroke="{color_hex}" stroke-width="{stroke_w:.1f}" />'
-        else:
-            w, h = radius * 1.5, radius * 1.5
-            elem = f'  <rect x="{cx - w/2:.1f}" y="{cy - h/2:.1f}" width="{w:.1f}" height="{h:.1f}" fill="none" stroke="{color_hex}" stroke-width="{stroke_w:.1f}" />'
-        svg_elements.append(elem)
-        
-    svg_elements.append('</svg>')
-    return "\n".join(svg_elements).strip()
+        if 0.5 < c_type <= 1.5:  # MoveTo
+            path_d_list.append(f"M {px:.1f} {py:.1f}")
+        elif 1.5 < c_type <= 2.5:  # LineTo
+            path_d_list.append(f"L {px:.1f} {py:.1f}")
+        elif c_type > 2.5:  # CubicTo
+            path_d_list.append(f"C {pcx1:.1f} {pcy1:.1f}, {pcx2:.1f} {pcy2:.1f}, {px:.1f} {py:.1f}")
+
+    d_string = " ".join(path_d_list) if path_d_list else "M 10 10 L 90 90"
+    
+    return f'''<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <path d="{d_string}" fill="none" stroke="{color_hex}" stroke-width="{stroke_width:.1f}" stroke-linecap="round" stroke-linejoin="round" />
+</svg>'''.strip()
 
 
 # -----------------------------------------------------------------------------
-# 2. Diffusion Transformer Architecture & Noise Schedule
+# 2. Sequence-Length Agnostic Diffusion Transformer
 # -----------------------------------------------------------------------------
 
 class SinusoidalPosEmb(nn.Module):
@@ -135,11 +190,11 @@ class SinusoidalPosEmb(nn.Module):
         return jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
 
 
-class VectorDiffusionTransformer(nn.Module):
-    d_model: int = 128
-    num_heads: int = 4
-    num_layers: int = 3
-    attr_dim: int = ATTR_DIM
+class FlexibleSVGDiffusionTransformer(nn.Module):
+    d_model: int = 256
+    num_heads: int = 8
+    num_layers: int = 4
+    cmd_dim: int = CMD_DIM
 
     @nn.compact
     def __call__(self, x_t, timesteps):
@@ -168,7 +223,7 @@ class VectorDiffusionTransformer(nn.Module):
             ])(norm_h2)
             h = h + mlp
             
-        pred_eps = nn.Dense(self.attr_dim)(nn.LayerNorm()(h))
+        pred_eps = nn.Dense(self.cmd_dim)(nn.LayerNorm()(h))
         return pred_eps
 
 
@@ -181,7 +236,6 @@ class LinearNoiseSchedule:
         self.sqrt_alphas_cumprod = np.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - self.alphas_cumprod)
 
-        # Convert schedule arrays to JAX DeviceArrays to support JIT dynamic indexing
         self.jnp_sqrt_alphas_cumprod = jnp.array(self.sqrt_alphas_cumprod)
         self.jnp_sqrt_one_minus_alphas_cumprod = jnp.array(self.sqrt_one_minus_alphas_cumprod)
 
@@ -189,7 +243,7 @@ schedule = LinearNoiseSchedule()
 
 
 # -----------------------------------------------------------------------------
-# 3. Training & Sampling Functions
+# 3. Dynamic Training, Parameter Averaging & Reverse Denoising
 # -----------------------------------------------------------------------------
 
 def compute_hash(filepath):
@@ -219,13 +273,37 @@ def save_processed_hashes(checkpoint_dir, hashes):
     tmp_file.replace(hash_file)
 
 
-def train_on_svg(svg_path, checkpoint_dir):
-    print(f"[*] Processing SVG vector features for diffusion training: {svg_path}")
-    svg_text = Path(svg_path).read_text(encoding="utf-8")
-    vec_data = svg_to_vector(svg_text)
-    x_0 = vec_data[None, ...]
+def load_and_average_checkpoints(checkpoint_files):
+    """Loads all model checkpoints, computes mean sequence length, and averages parameter trees."""
+    all_params = []
+    seq_lens = []
 
-    model = VectorDiffusionTransformer()
+    for ckpt_path in checkpoint_files:
+        with open(ckpt_path, "rb") as f:
+            payload = pickle.load(f)
+            all_params.append(payload["params"])
+            seq_lens.append(payload["seq_len"])
+
+    avg_seq_len = int(np.round(np.mean(seq_lens)))
+
+    # Compute unweighted element-wise arithmetic mean across parameter trees
+    avg_params = jax.tree.map(
+        lambda *args: jnp.mean(jnp.stack(args, axis=0), axis=0),
+        *all_params
+    )
+
+    return avg_params, avg_seq_len
+
+
+def train_on_svg(svg_path, checkpoint_dir):
+    print(f"[*] Extracting dynamic vector features for diffusion training: {svg_path}")
+    svg_text = Path(svg_path).read_text(encoding="utf-8")
+    vec_data = svg_to_vector_sequence(svg_text)
+    x_0 = vec_data[None, ...]  # Shape: (1, N_strokes, CMD_DIM)
+    seq_len = x_0.shape[1]
+    print(f"[*] File loaded with dynamic sequence length N = {seq_len} commands.")
+
+    model = FlexibleSVGDiffusionTransformer()
     key = jax.random.PRNGKey(42)
     dummy_x = jnp.zeros_like(x_0)
     dummy_t = jnp.zeros((1,), dtype=jnp.int32)
@@ -238,7 +316,6 @@ def train_on_svg(svg_path, checkpoint_dir):
 
     @jax.jit
     def diffusion_loss_fn(p, x_start, t, noise):
-        # Dynamically index JAX device arrays
         sqrt_a = schedule.jnp_sqrt_alphas_cumprod[t][:, None, None]
         sqrt_one_minus_a = schedule.jnp_sqrt_one_minus_alphas_cumprod[t][:, None, None]
         
@@ -274,20 +351,25 @@ def train_on_svg(svg_path, checkpoint_dir):
     ckpt_path = Path(checkpoint_dir) / f"{svg_path.stem}_params.pkl"
     tmp_ckpt_path = ckpt_path.with_suffix(".tmp")
     
+    ckpt_payload = {
+        "params": params,
+        "seq_len": seq_len
+    }
+    
     with jax_lock:
         with open(tmp_ckpt_path, "wb") as f:
-            pickle.dump(params, f)
+            pickle.dump(ckpt_payload, f)
         tmp_ckpt_path.replace(ckpt_path)
         
-    print(f"[*] Diffusion checkpoint saved: {ckpt_path} (Final MSE: {loss_val_py:.6f})")
+    print(f"[*] Diffusion checkpoint saved: {ckpt_path} (N={seq_len}, Final MSE: {loss_val_py:.6f})")
 
 
-def sample_diffusion_from_noise(params, rng_key):
-    """Runs reverse diffusion steps starting from pure Gaussian noise to synthesize blended SVGs."""
-    model = VectorDiffusionTransformer()
+def sample_diffusion_from_noise(params, seq_len, rng_key):
+    """Runs reverse diffusion for dynamically sized stroke sequences using aggregated weights."""
+    model = FlexibleSVGDiffusionTransformer()
     
     rng_key, subkey = jax.random.split(rng_key)
-    x_t = jax.random.normal(subkey, (1, MAX_PATHS, ATTR_DIM))
+    x_t = jax.random.normal(subkey, (1, seq_len, CMD_DIM))
 
     for t in reversed(range(schedule.timesteps)):
         t_array = jnp.array([t], dtype=jnp.int32)
@@ -310,7 +392,7 @@ def sample_diffusion_from_noise(params, rng_key):
 
 
 # -----------------------------------------------------------------------------
-# 4. FastAPI Service & Daemon Loop
+# 4. FastAPI Service Endpoint & Execution Loop
 # -----------------------------------------------------------------------------
 
 @app.get("/generate", response_class=PlainTextResponse)
@@ -324,22 +406,22 @@ def generate_svg_endpoint(response: Response):
             if not ckpt_files:
                 print("[!] No trained checkpoints found. Initializing fallback noise model...")
                 response.headers["X-Generator-Mode"] = "random-noise"
-                model = VectorDiffusionTransformer()
+                model = FlexibleSVGDiffusionTransformer()
                 key = jax.random.PRNGKey(int(time.time()))
-                dummy_x = jnp.zeros((1, MAX_PATHS, ATTR_DIM))
+                seq_len = 32
+                dummy_x = jnp.zeros((1, seq_len, CMD_DIM))
                 dummy_t = jnp.zeros((1,), dtype=jnp.int32)
                 params = model.init(key, dummy_x, dummy_t)
             else:
-                latest_ckpt = max(ckpt_files, key=os.path.getmtime)
-                response.headers["X-Generator-Mode"] = "diffusion-blended"
-                with open(latest_ckpt, "rb") as f:
-                    params = pickle.load(f)
+                print(f"[*] Aggregating and averaging weights across {len(ckpt_files)} checkpoints...")
+                response.headers["X-Generator-Mode"] = "diffusion-aggregated"
+                params, seq_len = load_and_average_checkpoints(ckpt_files)
 
             seed = int(time.time() * 1000) % 100000
-            generated_vectors = sample_diffusion_from_noise(params, jax.random.PRNGKey(seed))
-            svg_output = vector_to_svg(generated_vectors)
+            generated_matrix = sample_diffusion_from_noise(params, seq_len, jax.random.PRNGKey(seed))
+            svg_output = vector_sequence_to_svg(generated_matrix)
             
-        print(f"[+] Successfully generated synthesized SVG ({len(svg_output)} chars).")
+        print(f"[+] Successfully generated aggregated SVG ({len(svg_output)} chars, N={seq_len}, Checkpoints={len(ckpt_files)}).")
         return svg_output
     except Exception as e:
         print(f"[!] Error in /generate endpoint: {e}")
@@ -352,7 +434,7 @@ def main(input_dir, checkpoint_dir):
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     processed_hashes = load_processed_hashes(checkpoint_dir)
-    print(f"[*] Vector Diffusion Daemon started. Watching directory: {input_dir}")
+    print(f"[*] Flexible SVG Diffusion Daemon started. Watching directory: {input_dir}")
 
     while True:
         svg_files = list(Path(input_dir).glob("*.[sS][vV][gG]")) + list(Path(input_dir).glob("*.svg"))
